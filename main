@@ -1,0 +1,259 @@
+import socket
+import struct
+import time
+import textwrap
+
+TAB_1 = '\t - '
+TAB_2 = '\t\t - '
+TAB_3 = '\t\t\t - '
+TAB_4 = '\t\t\t\t - '
+
+DATA_TAB_1 = '\t   '
+DATA_TAB_2 = '\t\t   '
+DATA_TAB_3 = '\t\t\t   '
+DATA_TAB_4 = '\t\t\t\t   '
+
+
+
+#     Pcap Global Header Format :
+#                       ( magic number +
+#                         major version number +
+#                         minor version number +
+#                         GMT to local correction +
+#                         accuracy of timestamps +
+#                         max length of captured #packets, in octets +
+#                         data link type)
+#
+#
+
+PCAP_GLOBAL_HEADER_FMT = '@ I H H i I I I '
+
+
+# Global Header Values
+PCAP_MAGICAL_NUMBER = 2712847316
+PCAP_MJ_VERN_NUMBER = 2
+PCAP_MI_VERN_NUMBER = 4
+PCAP_LOCAL_CORECTIN = 0
+PCAP_ACCUR_TIMSTAMP = 0
+PCAP_MAX_LENGTH_CAP = 65535
+PCAP_DATA_LINK_TYPE = 1
+
+class Pcap:
+    def _init_(self, filename, link_type=1):
+        self.pcap_file=open(filename,'wb')
+        self.pcap_file.write(struct.pack('@IHHiIII', 0xa1b2c3d4, 2, 4, 0, 0, 65535, link_type))
+
+    def write(self,data):
+        ts_sec, ts_usec = map(int , str(time.time()).split('.'))
+        length = len(data)
+        self.pcap_file.write(struct.pack('@IIII', ts_sec, ts_usec, length, length))
+        self.pcap_file.write(data)
+
+    def close(self):
+        self.pcap_file.close()
+
+
+#----------------------------------------------------------------
+
+    # Format MAC Address
+def get_mac_addr(bytes_addr):
+    bytes_str = map('{:02x}'.format, bytes_addr)
+    mac_addr = ':'.join(bytes_str).upper()
+    return mac_addr
+
+def ether(data):
+ dest_mac, src_mac, proto = struct.unpack('! 6s 6s H', data[:14])
+ return [get_mac_addr(dest_mac), get_mac_addr(src_mac), proto, data[14:]]
+
+
+def ip(data):
+ maindata = data
+ data = struct.unpack('!BBHHHBBH4s4s', data[:20])
+ version_header_len = data[0]
+ version = version_header_len >> 4
+ header_len = (version_header_len & 0xF) * 4
+ return [version, header_len, data[1], data[2],
+ data[3], data[4] >> 13, data[4] & 0x1FFF, data[5],
+ data[6], hex(data[7]), socket.inet_ntoa(data[8]),
+ socket.inet_ntoa(data[9]), maindata[header_len:]]  #for IHL>5
+
+# Unpack IPv4 Packets Recieved
+def ipv4_Packet(data):
+    version_header_len = data[0]
+    version = version_header_len >> 4
+    header_len = (version_header_len & 15) * 4
+    ttl, proto, src, target = struct.unpack('! 8x B B 2x 4s 4s', data[:20])
+    return version, header_len, ttl, proto, ipv4(src), ipv4(target), data[header_len:]
+
+# Returns Formatted IP Address
+def ipv4(addr):
+    return '.'.join(map(str, addr))
+
+#ip_header = ip(ether_header[3])
+
+
+def icmp(data):
+ type, code, checksum = struct.unpack('!BBH', data[:4])
+ return [type, code, hex(checksum), repr(data[4:])]
+
+def arp(data):
+ htype, ptype, hlen, plen, oper, sha, spa, tha, tpa = struct.unpack('!HHBBH6s4s6s4s', data[:28])
+ return [type,ptype,socket.htons(hlen),socket.htons(plen),oper,get_mac_addr(sha),socket.inet_ntoa(spa),get_mac_addr(tha),socket.inet_ntoa(tpa),repr(data[28:])]
+
+# Unpacks for any TCP Packet
+def tcp(data):
+    (src_port, dest_port, sequence, ack, offset_reserved_flag,windowsize,checksum,urgent_pointer) = struct.unpack('! H H L L H H H H', data[:20])
+    offset = (offset_reserved_flag >> 12) & 15
+    reserved = (offset_reserved_flag >> 9) & 7
+    flag_ns = (offset_reserved_flag >> 8) & 1
+    flag_cwr = (offset_reserved_flag >> 7) & 1
+    flag_ece = (offset_reserved_flag >> 6) & 1
+    flag_urg = (offset_reserved_flag >> 5) & 1
+    flag_ack = (offset_reserved_flag >> 4) & 1
+    flag_psh = (offset_reserved_flag >> 3) & 1
+    flag_rst = (offset_reserved_flag >> 2) & 1
+    flag_syn = (offset_reserved_flag >> 1) & 1
+    flag_fin = offset_reserved_flag  & 1
+    option=data[20:offset*4]
+    return [src_port, dest_port, sequence, ack,offset,reserved,flag_ns,flag_cwr,flag_ece, flag_urg, flag_ack, flag_psh, flag_rst, flag_syn, flag_fin,windowsize,checksum,urgent_pointer,option, data[offset*4:]]
+
+# Unpacks for any UDP Packet
+def udp(data):
+    src_port, dest_port, length, checksum = struct.unpack('! H H H H', data[:8])
+    return [src_port, dest_port, length, checksum ,data[8:]]
+
+def dns(data):
+    id,qrs,qdcount,ancount,nscount,arcount=struct.unpack('!HHHHHH',data[:12]) #send after udp
+    qr = (qrs>>15)
+    opcode = (qrs >> 14) & 15
+    aa = (qrs >> 10) & 1
+    tc = (qrs >> 9) & 1
+    rd = (qrs >> 8) & 1
+    ra = (qrs >> 7) & 1
+    z = (qrs >> 4) & 1
+    rcode = qrs & 15
+    return [id,qr,opcode,aa,tc,rd,ra,z,rcode,qdcount,ancount,nscount,arcount,data[12:]]
+
+def print_with_tab(tab,s):
+    for i in range(0, len(s)-60, 60):
+        print(tab+s[i:i+60])
+    print(tab+s[(len(s)-len(s)%60) : len(s)])
+    return
+
+def main():
+  # Create Object
+  p = Pcap()
+  p._init_('network9725663')
+  conn = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.ntohs(3))
+  while True:
+   print("\n---------------------------------\n")
+   raw_data, addr = conn.recvfrom(65535)
+
+   # Save captured packets into pcap file
+   p.write(raw_data)
+
+   dest_mac, src_mac, eth_proto, data = ether(raw_data)
+   print('\n Ethernet Frame: ')
+   print(TAB_1 + 'Destination: {}, Source: {}, Protocol: {}'.format(dest_mac, src_mac, eth_proto))
+   print('\n Internet Protocol:')
+   if eth_proto == 0x0800:
+
+         (version, header_length, dscp_enc, tlength, identification, fragmentoffset, flag, ttl, proto, header_checksum, src, target, data)=ip(data)
+        # (version, header_length, ttl, proto, src, target, data) = ipv4_Packet(data)
+         print(TAB_1 + "IPV4 Packet:")
+         print(TAB_2 + 'Version: {}, Header Length: {}, TTL: {}'.format(version, header_length, ttl))
+         print(TAB_3 + 'protocol: {}, Source: {}, Target: {}'.format(proto, src, target))
+
+         # ICMP
+         if proto == 1:
+          icmp_type, code, checksum, data = icmp(data)
+          print(TAB_1 + 'ICMP Packet:')
+          print(TAB_2 + 'Type: {}, Code: {}, Checksum: {},'.format(icmp_type, code, checksum))
+          print(TAB_2 + 'ICMP Data:')
+          print_with_tab(DATA_TAB_3,str(data))
+          #print(DATA_TAB_3+ str(data))
+
+         # TCP
+         elif proto == 6:
+          src_port, dest_port, sequence, ack,offset,reserved,flag_ns,flag_cwr,flag_ece, flag_urg, flag_ack, flag_psh, flag_rst, flag_syn, flag_fin,windowsize,checksum,urgent_pointer,option, data = tcp(data)
+          print(TAB_1 + 'TCP Segment:')
+          print(TAB_2 + 'Source Port: {}, Destination Port: {}'.format(src_port, dest_port))
+          print(TAB_2 + 'Sequence: {}, Acknowledgment: {}'.format(sequence, ack))
+          print(TAB_2 + 'Flags:')
+          print(TAB_3 + 'NS: {}, CWR: {}, ECE: {}'.format(flag_ns, flag_cwr, flag_ece))
+          print(TAB_3 + 'URG: {}, ACK: {}, PSH: {}'.format(flag_urg, flag_ack, flag_psh))
+          print(TAB_3 + 'RST: {}, SYN: {}, FIN:{}'.format(flag_rst, flag_syn, flag_fin))
+          print(TAB_2+ 'Another: ')
+          print(TAB_3+ 'offset: {}, reserved: {}, winsows size:{}'.format(offset,reserved,windowsize));
+          print(TAB_3+ 'checksum: {}, Urgent pointer: {}'.format(checksum,urgent_pointer));
+          if(len(option)>0):
+              print(TAB_3+ 'option: {}'.format(option))
+
+          if len(data) > 0:
+           # HTTP
+           if (src_port == 80 or dest_port == 80):
+               print(TAB_2 + 'HTTP Data:')
+               try:
+                from scapy.layers.http import HTTP
+                http = HTTP(data)
+                http_info = str(http.data).split('\n')
+                for line in http_info:
+                 print(DATA_TAB_3 + str(line))
+               except:
+                   print_with_tab(DATA_TAB_3,str(data))
+                #print(DATA_TAB_3+str(data))
+           else:
+            print(TAB_2 + 'TCP Data:')
+            print_with_tab(DATA_TAB_3,str(data))
+            #print(DATA_TAB_3+str(data))
+         # UDP
+         elif proto == 17:#17
+          (src_port, dest_port, length,checksum, data) = udp(data)
+          print(TAB_1 + 'UDP Segment:')
+          print(TAB_2 + 'Source Port: {}, Destination Port: {}, Length: {},checksum: {}'.format(src_port, dest_port, length,checksum))
+
+          if(src_port == 53 or dest_port==53):  #dns
+              id, qr, opcode, aa, tc, rd, ra, z, rcode, qdcount, ancount, nscount, arcount, data = dns(data)
+              print(TAB_2 + 'DNS HEADER:')
+              print(TAB_3 + 'id: {}, qr: {}, opcode: {}'.format(id,qr,opcode))
+              print(TAB_3 + 'aa: {},tc: {}, rd: {}'.format(aa,tc,rd))
+              print(TAB_3 + 'ra: {},z: {}, rcode: {}'.format(ra,z,rcode))
+              print(TAB_3 + 'qdcount: {}, ancount: {}, nscount: {}, arcount: {}'.format(qdcount,ancount,nscount,arcount))
+              print(TAB_3 + 'DNS DATA :')
+              if(qdcount>0) : print(TAB_4 +'Query : '+ str(data[12 : 12+qdcount]))
+              if(ancount>0) : print(TAB_4 +'Answer : '+ str(data[12+qdcount : 12+qdcount+ancount]))
+              if(nscount>0) : print(TAB_4 +'Athurity : '+ str(data[12+qdcount+ancount : 12+qdcount+ancount+nscount]))
+              if(arcount>0) : print(TAB_4 +'Additional info : '+  str(data[12+qdcount+ancount+nscount : 12+qdcount+ancount+nscount+arcount]))
+
+          else:
+              print(TAB_2 + 'UDP Data:')
+              print_with_tab(DATA_TAB_3,str(data))
+             # print(DATA_TAB_3 + str(data))
+
+
+         # Other IPv4
+         else:
+          print(TAB_1 + 'Other IPv4 Data:')
+          print_with_tab(DATA_TAB_2,str(data))
+          #print(DATA_TAB_2+str( data))
+
+   elif eth_proto==(2054):  #arp 0x0806
+          htype, ptype, hlen, plen, oper, sha, spa, tha, tpa,data =arp(data)
+          print(TAB_1 + "ARP Packet:")
+          print(TAB_2 + 'Hardware type: {}, Protocol type: {}, Hardware address length: {}, Protocol address length: {}'.format(htype, ptype, hlen,plen))
+          print(TAB_3 + 'Sender hardware address: {}, Sender protocol address: {}'.format(sha,spa))
+          print(TAB_3 + 'Target  hardware address: {}, Target  protocol address: {}'.format(tha,tpa))
+          print(TAB_3 + 'other data: ')
+          print_with_tab(DATA_TAB_3,str(data))
+          #exit(0)
+
+   else:
+    print('Ethernet Data:')
+    print_with_tab(DATA_TAB_1,str(data))
+    #print(DATA_TAB_1+str( data))
+  return
+
+
+
+while True:
+ main()
